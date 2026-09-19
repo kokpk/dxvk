@@ -105,6 +105,17 @@ namespace dxvk {
     void*           mapPtr = nullptr;
   };
 
+  // 放大后的光标位图缓存项：data 由 stb_image/malloc 分配，析构时统一 stbi_image_free
+  struct D3D9SideloadCursor {
+    unsigned char *data = nullptr;
+
+    UINT XHotSpot = 0u;
+    UINT YHotSpot = 0u;
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+  };
+
   struct D3D9TextureSlotTracking {
     /* Pixel shaders can access 16 textures/samplers.
      * Then there's 1 dmap texture/sampler.
@@ -1599,6 +1610,10 @@ namespace dxvk {
     VkDeviceSize                    m_discardMemoryOnFlush = 0u;
 
     D3D9Cursor                      m_cursor;
+    // 光标内容哈希 -> 放大后位图 的缓存，键为 MetroHash64 十六进制串或 sideload 文件名前缀
+    std::unordered_map<std::string, struct D3D9SideloadCursor> m_sideloadCursors;
+
+    D3D9SideloadCursor GetEnlargedCursor(const bool hwCursor, uint32_t inputWidth, uint32_t inputHeight, UINT XHotSpot, UINT YHotSpot, const uint8_t* inputData);
 
     Com<D3D9Surface, false>         m_autoDepthStencil;
 

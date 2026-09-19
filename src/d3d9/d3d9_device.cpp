@@ -22,10 +22,19 @@
 #include "../util/util_bit.h"
 #include "../util/util_math.h"
 
+#include "../util/hqx/hqx.h"
+
+#include "../util/stb/stb_image.h"
+
+#include "../util/metrohash/metrohash64.h"
+
 #include "d3d9_initializer.h"
 
 #include <algorithm>
 #include <cfloat>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #ifdef MSC_VER
 #pragma fenv_access (on)
 #endif
@@ -151,6 +160,86 @@ namespace dxvk {
     BindFFUbershader<D3D9ShaderType::PixelShader>();
 
     m_unlockAdditionalFormats = m_parent->HasFormatsUnlocked();
+
+    hqxInit();
+
+    // 启用光标放大时，尝试从游戏目录下的 SideloadCursors 文件夹加载自定义光标图，
+    // 文件名格式：<内容哈希>-<热点X>,<热点Y>.png，命中哈希则直接用大图替换放大结果
+    if (m_d3d9Options.enlargeHardwareCursor == 2 || m_d3d9Options.enlargeHardwareCursor == 3 || m_d3d9Options.enlargeHardwareCursor == 4) {
+      namespace fs = std::filesystem;
+
+      unsigned char* data = NULL;
+
+      try
+      {
+        Logger::info("Attempting to sideload D3D9 hardware cursor...");
+
+        fs::path sideloadDirectory{"SideloadCursors"};
+        if (fs::exists(sideloadDirectory) && fs::is_directory(sideloadDirectory))
+        {
+          for (auto const &entry : fs::directory_iterator{sideloadDirectory})
+          {
+
+            if (!entry.is_directory())
+            {
+              int w, h, n;
+
+              // stb_image 已定义 STBI_WINDOWS_UTF8，此处路径按 UTF-8 传入
+              data = stbi_load(entry.path().u8string().data(), &w, &h, &n, 0);
+
+              std::string fullname(entry.path().stem().u8string().data());
+              std::string::size_type hashOffset = fullname.find("-");
+              std::string::size_type hotspotOffset = fullname.rfind(",");
+
+              if (data != NULL && n == (int)HardwareCursorFormatSize && w <= (int)HardwareCursorWidth && h <= (int)HardwareCursorHeight && hashOffset != std::string::npos && hotspotOffset != std::string::npos)
+              {
+                std::string hashStr = fullname.substr(0, hashOffset);
+                // 用首尾两个分隔符的位置截出中间的热点 X 坐标字符串
+                std::string hotXstr = fullname.substr(hashOffset + 1, fullname.length() - (hashOffset + 1) - (fullname.length() - hotspotOffset));
+                std::string hotYstr = fullname.substr(hotspotOffset + 1);
+
+                struct D3D9SideloadCursor c;
+                c.data = data;
+                c.XHotSpot = std::stoul(hotXstr);
+                c.YHotSpot = std::stoul(hotYstr);
+                c.width = w;
+                c.height = h;
+
+                // stb_image 读出的是 RGBA，Windows 光标位图需要 BGRA，逐像素交换 R/B
+                for (int y = 0; y < h; ++y)
+                {
+                  for (int x = 0; x < w; ++x)
+                  {
+                    unsigned char *ptr = &c.data[(x + y * w) * HardwareCursorFormatSize];
+
+                    unsigned char tmp = ptr[0];
+                    ptr[0] = ptr[2];
+                    ptr[2] = tmp;
+                  }
+                }
+
+                m_sideloadCursors.insert({hashStr, c});
+
+                // Windows 上 path::string() 从 wchar_t 转换的行为是“未指明的”，
+                // 实测该路径在 Linux 和 Windows 下都能正常进日志
+                Logger::info(entry.path().string());
+              }
+              else
+              {
+                stbi_image_free(data);
+                data = NULL;
+              }
+            }
+          }
+        }
+      }
+      catch (std::exception const &err)
+      {
+        stbi_image_free(data);
+        data = NULL;
+        Logger::info(err.what());
+      }
+    }
   }
 
 
@@ -170,6 +259,11 @@ namespace dxvk {
     delete m_converter;
 
     m_dxvkDevice->waitForIdle(); // Sync Device
+
+    // 释放光标放大功能缓存的所有位图（含 sideload 与 hqx 放大产物）
+    for (const auto& i : m_sideloadCursors) {
+      stbi_image_free(i.second.data);
+    }
   }
 
 
@@ -298,6 +392,96 @@ namespace dxvk {
   }
 
 
+  // 按 d3d9.enlargeHardwareCursor 指定的倍数放大光标位图：
+  // 先按内容哈希查缓存（SideloadCursors 自定义图或此前放大结果），未命中再用 hqx 算法放大
+  D3D9SideloadCursor D3D9DeviceEx::GetEnlargedCursor(const bool hwCursor, uint32_t inputWidth, uint32_t inputHeight, UINT XHotSpot, UINT YHotSpot, const uint8_t* inputData){
+    switch (m_d3d9Options.enlargeHardwareCursor)
+    {
+    case 2:
+    case 3:
+    case 4:
+      break;
+    default:
+      return {};
+    }
+
+    if(hwCursor) {
+      // 硬件光标位图上限 128x128，放大后超出则放弃放大
+      if(inputWidth * m_d3d9Options.enlargeHardwareCursor > HardwareCursorWidth
+        || inputHeight * m_d3d9Options.enlargeHardwareCursor > HardwareCursorHeight) {
+          return {};
+        }
+    }
+
+    uint32_t inputPitch = inputWidth * HardwareCursorFormatSize;
+
+    uint8_t hashBytes[8];
+    JAndrewRogers::MetroHash64::Hash(inputData, inputPitch * inputHeight, hashBytes);
+
+    std::stringstream hexString{};
+    hexString << std::hex;
+    for (auto const& i: hashBytes) {
+      hexString << std::setw(2) << std::setfill('0') << (int)i;
+    }
+    std::string hash = hexString.str();
+    if(hwCursor) {
+      Logger::info("Enlarge D3D9 hardware cursor: " + hash);
+    } else {
+      Logger::info("Enlarge D3D9 software cursor: " + hash);
+    }
+
+    D3D9SideloadCursor result = {};
+
+    if( auto search = m_sideloadCursors.find(hash); search != m_sideloadCursors.end() ) {
+      // 缓存命中
+      result = search->second;
+    } else {
+      // 未命中，用 hqx 放大，热点和尺寸同步乘倍数
+      result.XHotSpot = XHotSpot * m_d3d9Options.enlargeHardwareCursor;
+      result.YHotSpot = YHotSpot * m_d3d9Options.enlargeHardwareCursor;
+      result.width = inputWidth * m_d3d9Options.enlargeHardwareCursor;
+      result.height = inputHeight * m_d3d9Options.enlargeHardwareCursor;
+
+      // 这里用 malloc 分配，之后统一交给 stbi_image_free 释放（未自定义 STBI_MALLOC，二者兼容）
+      result.data = (unsigned char*)malloc(result.width * result.height * HardwareCursorFormatSize);
+      if(result.data == NULL) {
+        Logger::err("Failed to malloc() for hqx cursor");
+        return {};
+      }
+
+      uint32_t *dstPtr = (uint32_t *)result.data;
+      uint32_t *srcPtr = (uint32_t *)inputData;
+
+      switch (m_d3d9Options.enlargeHardwareCursor)
+      {
+      case 2:
+      {
+        hq2x_32_rb(srcPtr, inputPitch, dstPtr, result.width * HardwareCursorFormatSize, inputWidth, inputHeight);
+      }
+      break;
+      case 3:
+      {
+        hq3x_32_rb(srcPtr, inputPitch, dstPtr, result.width * HardwareCursorFormatSize, inputWidth, inputHeight);
+      }
+      break;
+      case 4:
+      {
+        hq4x_32_rb(srcPtr, inputPitch, dstPtr, result.width * HardwareCursorFormatSize, inputWidth, inputHeight);
+      }
+      break;
+      default:
+      {
+        free(result.data);
+        return {};
+      }
+      }
+
+      m_sideloadCursors.insert({hash, result});
+    }
+
+    return result;
+  }
+
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::SetCursorProperties(
           UINT               XHotSpot,
           UINT               YHotSpot,
@@ -311,8 +495,8 @@ namespace dxvk {
     if (unlikely(cursorTex->Desc()->Format != D3D9Format::A8R8G8B8))
       return D3DERR_INVALIDCALL;
 
-    const uint32_t inputWidth  = cursorTex->Desc()->Width;
-    const uint32_t inputHeight = cursorTex->Desc()->Height;
+    uint32_t inputWidth  = cursorTex->Desc()->Width;
+    uint32_t inputHeight = cursorTex->Desc()->Height;
 
     // Check if surface dimensions are powers of two.
     if (unlikely((inputWidth  && (inputWidth  & (inputWidth  - 1)))
@@ -338,9 +522,9 @@ namespace dxvk {
     D3DPRESENT_PARAMETERS params;
     m_implicitSwapchain->GetPresentParameters(&params);
 
-    // Use a hardware cursor if w/h == 32 px or when windowed.
-    const bool hwCursor = (inputWidth  == HardwareCursorWidth &&
-                           inputHeight == HardwareCursorHeight)
+    // Use a hardware cursor if w/h <= 128 px or when windowed.
+    const bool hwCursor = (inputWidth  <= HardwareCursorWidth &&
+                           inputHeight <= HardwareCursorHeight)
                           || params.Windowed;
 
     D3DLOCKED_BOX lockedBox;
@@ -353,17 +537,28 @@ namespace dxvk {
     if (hwCursor) {
       CursorBitmap bitmap = { 0 };
       // We need to consider applications that might misbehave in
-      // windowed mode, setting a cursor smaller or larger than 32 x 32 px.
+      // windowed mode, setting a cursor that does not fit the bitmap.
       const size_t copyPitch = std::min<size_t>(
         HardwareCursorPitch,
         inputWidth * HardwareCursorFormatSize);
-      const size_t copyHeight = std::min<size_t>(
-        HardwareCursorHeight,
-        inputHeight);
 
-      // Windows works with a stride of 128, let's respect that.
-      for (uint32_t h = 0; h < copyHeight; h++)
-        std::memcpy(&bitmap[h * HardwareCursorPitch], &data[h * lockedBox.RowPitch], copyPitch);
+      // 光标放大开启时，用放大/sideload 后的大图替换
+      D3D9SideloadCursor largeCursor = GetEnlargedCursor(hwCursor, inputWidth, inputHeight, XHotSpot, YHotSpot, data);
+
+      if(largeCursor.data != nullptr) {
+        XHotSpot = largeCursor.XHotSpot;
+        YHotSpot = largeCursor.YHotSpot;
+        for (uint32_t h = 0; h < largeCursor.height; h++)
+          std::memcpy(&bitmap[h * HardwareCursorPitch], &largeCursor.data[h * largeCursor.width * HardwareCursorFormatSize], largeCursor.width * HardwareCursorFormatSize);
+      } else {
+        // 未启用放大或放大失败时退回原始拷贝，行数钳制到位图高度上限
+        const size_t copyHeight = std::min<size_t>(
+          HardwareCursorHeight,
+          inputHeight);
+
+        for (uint32_t h = 0; h < copyHeight; h++)
+          std::memcpy(&bitmap[h * HardwareCursorPitch], &data[h * lockedBox.RowPitch], copyPitch);
+      }
 
       hr = UnlockImage(cursorTex, 0, 0);
       if (unlikely(FAILED(hr)))
@@ -371,11 +566,24 @@ namespace dxvk {
 
       m_cursor.SetHardwareCursor(XHotSpot, YHotSpot, bitmap);
     } else {
+      D3D9SideloadCursor largeCursor = GetEnlargedCursor(hwCursor, inputWidth, inputHeight, XHotSpot, YHotSpot, data);
+      if(largeCursor.data != nullptr) {
+        XHotSpot = largeCursor.XHotSpot;
+        YHotSpot = largeCursor.YHotSpot;
+        inputWidth = largeCursor.width;
+        inputHeight = largeCursor.height;
+      }
+
       const size_t copyPitch = inputWidth * HardwareCursorFormatSize;
       std::vector<uint8_t> bitmap(inputHeight * copyPitch, 0);
 
-      for (uint32_t h = 0; h < inputHeight; h++)
-        std::memcpy(&bitmap[h * copyPitch], &data[h * lockedBox.RowPitch], copyPitch);
+      if(largeCursor.data != nullptr) {
+        for (uint32_t h = 0; h < inputHeight; h++)
+          std::memcpy(&bitmap[h * copyPitch], &largeCursor.data[h * copyPitch], copyPitch);
+      } else {
+        for (uint32_t h = 0; h < inputHeight; h++)
+          std::memcpy(&bitmap[h * copyPitch], &data[h * lockedBox.RowPitch], copyPitch);
+      }
 
       hr = UnlockImage(cursorTex, 0, 0);
       if (unlikely(FAILED(hr)))

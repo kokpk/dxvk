@@ -27,6 +27,15 @@ util_src = files([
 
   'sync/sync_recursive.cpp',
   'sync/sync_scoped.cpp',
+
+  'hqx/hq2x.cpp',
+  'hqx/hq3x.cpp',
+  'hqx/hq4x.cpp',
+  'hqx/hqx_init.cpp',
+
+  'stb/stb_image.cpp',
+
+  'metrohash/metrohash64.cpp',
 ])
 
 util_lib = static_library('util', util_src,

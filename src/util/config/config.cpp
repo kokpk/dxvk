@@ -42,9 +42,11 @@ namespace dxvk {
       { "dxgi.syncInterval",                   "1" },
     }} },
     /* World of Warcraft                           *
-     * Bugs out on some multi-gpu systems.         */
+     * Bugs out on some multi-gpu systems.         *
+     * 高分辨率下 32x32 硬件光标过小，默认放大 4 倍 */
     { R"(\\Wow(Classic)?\.exe$)", {{
       { "dxvk.hideIntegratedGraphics",      "True" },
+      { "d3d9.enlargeHardwareCursor",       "4" },
     }} },
     /* Bright Memory - Will choose other vendors   *
      * over Intel even if Intel is the only dGPU   */

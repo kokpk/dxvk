@@ -18,8 +18,9 @@ namespace dxvk {
     bool ClearCursor = false;
   };
 
-  constexpr uint32_t HardwareCursorWidth      = 32u;
-  constexpr uint32_t HardwareCursorHeight     = 32u;
+  // 光标上限放宽到 128x128，配合 d3d9.enlargeHardwareCursor 最大 4 倍放大（32*4=128）
+  constexpr uint32_t HardwareCursorWidth      = 128u;
+  constexpr uint32_t HardwareCursorHeight     = 128u;
   constexpr uint32_t HardwareCursorFormatSize = 4u;
   constexpr uint32_t HardwareCursorPitch      = HardwareCursorWidth * HardwareCursorFormatSize;
 
