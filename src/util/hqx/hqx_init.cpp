@@ -18,6 +18,9 @@
 
 #include <cstdint>
 #include "hqx.h"
+/* 必须包含 hqx_common.h：其中 extern "C" 声明了 RGBtoYUV，
+   让下方的定义继承 C 链接名，否则 MSVC 下定义被 C++ 名字修饰导致 LNK2019 */
+#include "hqx_common.h"
 
 uint32_t   RGBtoYUV[16777216];
 uint32_t   YUV1, YUV2;
