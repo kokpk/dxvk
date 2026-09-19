@@ -22,13 +22,14 @@
 #ifndef __HQX_COMMON_H_
 #define __HQX_COMMON_H_
 
+/* 标准库头文件必须放在 extern "C" 块外面，否则 MSVC 报 C2733（abs 重载冲突） */
+#include <cstdlib>
+#include <cstdint>
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
-
-#include <cstdlib>
-#include <cstdint>
 
 #define MASK_2     0x0000FF00
 #define MASK_13    0x00FF00FF
@@ -53,9 +54,10 @@ static inline uint32_t rgb_to_yuv(uint32_t c)
 
 /* Test if there is difference in color */
 static inline int yuv_diff(uint32_t yuv1, uint32_t yuv2) {
-    return (( abs((yuv1 & Ymask) - (yuv2 & Ymask)) > trY ) ||
-            ( abs((yuv1 & Umask) - (yuv2 & Umask)) > trU ) ||
-            ( abs((yuv1 & Vmask) - (yuv2 & Vmask)) > trV ) );
+    /* 参数显式转成 int32_t，否则 MSVC 对无符号实参的 abs() 报 C2668 歧义调用 */
+    return (( abs((int32_t)((yuv1 & Ymask) - (yuv2 & Ymask))) > trY ) ||
+            ( abs((int32_t)((yuv1 & Umask) - (yuv2 & Umask))) > trU ) ||
+            ( abs((int32_t)((yuv1 & Vmask) - (yuv2 & Vmask))) > trV ) );
 }
 
 static inline int Diff(uint32_t c1, uint32_t c2)
